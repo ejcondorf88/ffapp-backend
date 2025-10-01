@@ -17,5 +17,5 @@ python-dotenv==1.0.1
 
 # Validación
 pydantic==2.10.3
-"""
+
 
