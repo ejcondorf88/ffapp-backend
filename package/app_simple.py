@@ -64,109 +64,113 @@ def test_connection():
 
 @app.route('/api/facturas/upload', methods=['POST'])
 def upload_factura():
-    """Subir una factura PDF"""
     try:
-        print("🔍 DEBUG: Iniciando upload de factura")
-        
-        # Verificar que se envió un archivo
-        if 'file' not in request.files:
-            print("❌ ERROR: No se proporcionó ningún archivo")
-            return jsonify({
-                'success': False,
-                'error': 'No se proporcionó ningún archivo'
-            }), 400
-        
-        file = request.files['file']
+        # Obtener archivo y datos del formulario
+        file = request.files.get('file')
         organizacion = request.form.get('organizacion')
-        
-        print(f"🔍 DEBUG: Archivo recibido: {file.filename if file else 'None'}")
-        print(f"🔍 DEBUG: Organización: {organizacion}")
-        
-        if not organizacion:
-            print("❌ ERROR: No se proporcionó la organización")
-            return jsonify({
-                'success': False,
-                'error': 'No se proporcionó la organización'
-            }), 400
-        
-        if not file or file.filename == '':
-            print("❌ ERROR: Archivo vacío o sin nombre")
-            return jsonify({
-                'success': False,
-                'error': 'Archivo vacío o sin nombre'
-            }), 400
-        
-        # Validar que sea PDF
-        if not file.filename.lower().endswith('.pdf'):
-            print("❌ ERROR: Solo se permiten archivos PDF")
-            return jsonify({
-                'success': False,
-                'error': 'Solo se permiten archivos PDF'
-            }), 400
-        
-        # Configurar directorio de uploads correcto
-        upload_folder = os.path.join(os.path.dirname(__file__), 'src', 'configuration', 'files')
-        os.makedirs(upload_folder, exist_ok=True)
-        print(f"🔍 DEBUG: Carpeta de upload: {upload_folder}")
-        
-        # Generar nombre de archivo estructurado
-        now = datetime.now()
-        fecha_str = now.strftime("%d%m%Y")
-        
-        # Limpiar nombre de la organización
-        org_clean = organizacion.replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_')
-        org_clean = ''.join(c for c in org_clean if c.isalnum() or c in ['_'])
-        
+        fecha_str = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        org_clean = organizacion.replace(" ", "_") if organizacion else "Desconocida"
+        files_folder = os.path.join(os.path.dirname(__file__), 'src', 'configuration', 'files')
+        if not os.path.exists(files_folder):
+            os.makedirs(files_folder)
+
         # Generar nombre del archivo
         filename = f"ONG-{org_clean}_Factura_{fecha_str}.pdf"
-        file_path = os.path.join(upload_folder, filename)
-        
-        # Verificar si el archivo ya existe
+        file_path = os.path.join(files_folder, filename)
         archivo_existe = os.path.exists(file_path)
         reemplazar = request.form.get('reemplazar', 'false').lower() == 'true'
-        
-        if archivo_existe and not reemplazar:
-            # Buscar registro existente en base de datos
-            factura_existente = Factura.query.filter_by(
-                organizacion=organizacion,
-                ruta_factura=file_path
-            ).first()
-            
-            if factura_existente:
+
+        # Buscar registro existente en base de datos por organización
+        factura_existente = Factura.query.filter_by(organizacion=organizacion).first()
+
+        if factura_existente and not reemplazar:
+            return jsonify({
+                'success': False,
+                'error': 'Archivo ya existe',
+                'message': 'Ya existe una factura para esta organización',
+                'archivo_existente': True,
+                'factura_id': factura_existente.id,
+                'filename': filename,
+                'sugerencia': 'Si desea reemplazarlo, envíe reemplazar=true en el formulario'
+            }), 409  # Conflict
+
+        if factura_existente and reemplazar:
+            # Eliminar archivo anterior si existe
+            try:
+                if os.path.exists(factura_existente.ruta_factura):
+                    os.remove(factura_existente.ruta_factura)
+                    print(f"🗑️ Archivo anterior eliminado: {factura_existente.ruta_factura}")
+            except Exception as e:
+                print(f"⚠️ Error eliminando archivo anterior: {e}")
+            # Actualizar registro existente
+            factura_existente.ruta_factura = file_path
+            factura_existente.fecha_actualizacion = datetime.utcnow()
+            file.save(file_path)
+            db.session.commit()
+            print("✅ Registro existente actualizado en base de datos")
+            return jsonify({
+                'success': True,
+                'message': 'Factura reemplazada exitosamente',
+                'filename': filename,
+                'file_path': file_path,
+                'factura_id': factura_existente.id,
+                'organizacion': organizacion,
+                'reemplazado': True
+            }), 200
+
+        if not factura_existente:
+            # Guardar archivo y crear nuevo registro
+            file.save(file_path)
+            print(f"✅ SUCCESS: Archivo guardado en: {file_path}")
+            try:
+                factura = Factura(
+                    organizacion=organizacion,
+                    ruta_factura=file_path
+                )
+                db.session.add(factura)
+                db.session.commit()
+                print("✅ SUCCESS: Nuevo registro guardado en base de datos")
+                return jsonify({
+                    'success': True,
+                    'message': 'Factura guardada exitosamente',
+                    'filename': filename,
+                    'file_path': file_path,
+                    'factura_id': factura.id,
+                    'organizacion': organizacion,
+                    'reemplazado': False
+                }), 201
+            except Exception as db_error:
+                print(f"❌ ERROR: Error en base de datos: {db_error}")
+                db.session.rollback()
                 return jsonify({
                     'success': False,
-                    'error': 'Archivo ya existe',
-                    'message': 'Ya existe un archivo con este nombre para esta organización',
-                    'archivo_existente': True,
-                    'factura_id': factura_existente.id,
-                    'filename': filename,
-                    'sugerencia': 'Si desea reemplazarlo, envíe reemplazar=true en el formulario'
-                }), 409  # Conflict
-        
+                    'error': f'Error guardando en base de datos: {str(db_error)}'
+                }), 500
+
         # Si existe y se quiere reemplazar, eliminar el archivo anterior
         if archivo_existe and reemplazar:
             try:
                 os.remove(file_path)
                 print(f"🗑️ Archivo anterior eliminado: {file_path}")
-                
+
                 # Actualizar registro en base de datos si existe
                 factura_existente = Factura.query.filter_by(
                     organizacion=organizacion,
                     ruta_factura=file_path
                 ).first()
-                
+
                 if factura_existente:
                     factura_existente.fecha_actualizacion = datetime.utcnow()
                     db.session.commit()
                     print("✅ Registro existente actualizado en base de datos")
-                    
+
             except Exception as e:
                 print(f"⚠️ Error eliminando archivo anterior: {e}")
-        
+
         # Guardar archivo
         file.save(file_path)
         print(f"✅ SUCCESS: Archivo guardado en: {file_path}")
-        
+
         # Guardar en base de datos
         try:
             # Si no existe o se está reemplazando, crear nuevo registro
@@ -178,7 +182,7 @@ def upload_factura():
                 db.session.add(factura)
                 db.session.commit()
                 print("✅ SUCCESS: Nuevo registro guardado en base de datos")
-                
+
                 return jsonify({
                     'success': True,
                     'message': 'Factura guardada exitosamente',
@@ -196,7 +200,7 @@ def upload_factura():
                     'file_path': file_path,
                     'organizacion': organizacion
                 }), 200
-            
+
         except Exception as db_error:
             print(f"❌ ERROR: Error en base de datos: {db_error}")
             db.session.rollback()
@@ -204,7 +208,7 @@ def upload_factura():
                 'success': False,
                 'error': f'Error guardando en base de datos: {str(db_error)}'
             }), 500
-            
+
     except Exception as e:
         print(f"💥 EXCEPTION: Error interno del servidor: {str(e)}")
         import traceback
